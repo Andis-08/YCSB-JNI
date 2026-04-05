@@ -60,6 +60,9 @@ public class ZnsTxClient extends DB {
   private static native int nativeWriteObj(String objKey, long offset, byte[] data);
   private static native byte[] nativeReadObj(String objKey, long offset, int length);
 
+  private static native int nativePutObj(String objKey, byte[] data);
+  private static native byte[] nativeGetObj(String objKey, int maxLength);
+
   @Override
   public void init() throws DBException {
     Properties props = getProperties();
@@ -96,22 +99,15 @@ public class ZnsTxClient extends DB {
   @Override
   public Status read(String table, String key, Set<String> fields, Map<String, ByteIterator> result) {
     String objKey = objectKey(table, key);
-    boolean txStarted = false;
     try {
-      if (nativeBeginTx() != 0) {
-        return Status.ERROR;
-      }
-      txStarted = true;
+      byte[] raw = nativeGetObj(objKey, readBufferBytes);
 
-      byte[] raw = nativeReadObj(objKey, 0L, readBufferBytes);
-      if (raw == null) {
-        endTxBestEffort(txStarted);
-        return Status.ERROR;
+      if (raw == null || raw.length == 0) {
+        return Status.NOT_FOUND;
       }
 
       Map<String, byte[]> decoded = deserializeFields(raw);
       if (decoded.isEmpty()) {
-        endTxBestEffort(txStarted);
         return Status.NOT_FOUND;
       }
 
@@ -128,16 +124,15 @@ public class ZnsTxClient extends DB {
         }
       }
 
-      return nativeEndTx() == 0 ? Status.OK : Status.ERROR;
+      return Status.OK;
     } catch (RuntimeException e) {
-      endTxBestEffort(txStarted);
       return Status.ERROR;
     }
   }
 
   @Override
   public Status scan(String table, String startkey, int recordcount, Set<String> fields,
-                     Vector<HashMap<String, ByteIterator>> result) {
+      Vector<HashMap<String, ByteIterator>> result) {
     return Status.NOT_IMPLEMENTED;
   }
 
@@ -145,21 +140,13 @@ public class ZnsTxClient extends DB {
   public Status update(String table, String key, Map<String, ByteIterator> values) {
     String objKey = objectKey(table, key);
     byte[] payload = serializeFields(values);
-    boolean txStarted = false;
     try {
-      if (nativeBeginTx() != 0) {
+      if (nativePutObj(objKey, payload) == 0) {
+        return Status.OK;
+      } else {
         return Status.ERROR;
       }
-      txStarted = true;
-
-      if (nativeWriteObj(objKey, 0L, payload) != 0) {
-        endTxBestEffort(txStarted);
-        return Status.ERROR;
-      }
-
-      return nativeEndTx() == 0 ? Status.OK : Status.ERROR;
     } catch (RuntimeException e) {
-      endTxBestEffort(txStarted);
       return Status.ERROR;
     }
   }
@@ -170,22 +157,11 @@ public class ZnsTxClient extends DB {
     byte[] payload = serializeFields(values);
     boolean txStarted = false;
     try {
-      if (nativeBeginTx() != 0) {
+      if (nativePutObj(objKey, payload) == 0) {
+        return Status.OK;
+      } else {
         return Status.ERROR;
       }
-      txStarted = true;
-
-      if (nativeCreateObj(objKey) != 0) {
-        endTxBestEffort(txStarted);
-        return Status.ERROR;
-      }
-
-      if (nativeWriteObj(objKey, 0L, payload) != 0) {
-        endTxBestEffort(txStarted);
-        return Status.ERROR;
-      }
-
-      return nativeEndTx() == 0 ? Status.OK : Status.ERROR;
     } catch (RuntimeException e) {
       endTxBestEffort(txStarted);
       return Status.ERROR;
