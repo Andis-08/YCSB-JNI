@@ -106,22 +106,44 @@ public class ZnsTxClient extends DB {
         return Status.NOT_FOUND;
       }
 
-      Map<String, byte[]> decoded = deserializeFields(raw);
-      if (decoded.isEmpty()) {
-        return Status.NOT_FOUND;
+      final ByteBuffer buf = ByteBuffer.allocate(4);
+      int offset = 0;
+      boolean foundAny = false;
+
+      while (offset + 4 <= raw.length) {
+        buf.put(raw, offset, 4);
+        buf.flip();
+        final int keyLen = buf.getInt();
+        buf.clear();
+        offset += 4;
+
+        if (keyLen <= 0 || offset + keyLen + 4 > raw.length) {
+          break; // Stop parsing if padded zeros are reached or malformed data
+        }
+
+        final String fieldName = new String(raw, offset, keyLen, StandardCharsets.UTF_8);
+        offset += keyLen;
+
+        buf.put(raw, offset, 4);
+        buf.flip();
+        final int valueLen = buf.getInt();
+        buf.clear();
+        offset += 4;
+
+        if (valueLen < 0 || offset + valueLen > raw.length) {
+          break; // Malformed data
+        }
+
+        foundAny = true;
+        if (fields == null || fields.contains(fieldName)) {
+          result.put(fieldName, new ByteArrayByteIterator(raw, offset, valueLen));
+        }
+
+        offset += valueLen;
       }
 
-      if (fields == null) {
-        for (Map.Entry<String, byte[]> entry : decoded.entrySet()) {
-          result.put(entry.getKey(), new ByteArrayByteIterator(entry.getValue()));
-        }
-      } else {
-        for (String field : fields) {
-          byte[] value = decoded.get(field);
-          if (value != null) {
-            result.put(field, new ByteArrayByteIterator(value));
-          }
-        }
+      if (!foundAny) {
+        return Status.NOT_FOUND;
       }
 
       return Status.OK;
@@ -137,7 +159,7 @@ public class ZnsTxClient extends DB {
   }
 
   @Override
-  public Status update(String table, String key, Map<String, ByteIterator> values) {
+  public Status insert(String table, String key, Map<String, ByteIterator> values) {
     String objKey = objectKey(table, key);
     byte[] payload = serializeFields(values);
     try {
@@ -152,18 +174,56 @@ public class ZnsTxClient extends DB {
   }
 
   @Override
-  public Status insert(String table, String key, Map<String, ByteIterator> values) {
+  public Status update(String table, String key, Map<String, ByteIterator> values) {
     String objKey = objectKey(table, key);
-    byte[] payload = serializeFields(values);
-    boolean txStarted = false;
     try {
+      byte[] existingData = nativeGetObj(objKey, readBufferBytes);
+      Map<String, ByteIterator> mergedValues = new HashMap<>();
+
+      if (existingData != null && existingData.length > 0) {
+        final ByteBuffer buf = ByteBuffer.allocate(4);
+        int offset = 0;
+
+        while (offset + 4 <= existingData.length) {
+          buf.put(existingData, offset, 4);
+          buf.flip();
+          final int keyLen = buf.getInt();
+          buf.clear();
+          offset += 4;
+
+          if (keyLen <= 0 || offset + keyLen + 4 > existingData.length) {
+            break;
+          }
+
+          final String fieldName = new String(existingData, offset, keyLen, StandardCharsets.UTF_8);
+          offset += keyLen;
+
+          buf.put(existingData, offset, 4);
+          buf.flip();
+          final int valueLen = buf.getInt();
+          buf.clear();
+          offset += 4;
+
+          if (valueLen < 0 || offset + valueLen > existingData.length) {
+            break;
+          }
+
+          mergedValues.put(fieldName, new ByteArrayByteIterator(existingData, offset, valueLen));
+          offset += valueLen;
+        }
+      }
+
+      for (Map.Entry<String, ByteIterator> entry : values.entrySet()) {
+        mergedValues.put(entry.getKey(), entry.getValue());
+      }
+
+      byte[] payload = serializeFields(mergedValues);
       if (nativePutObj(objKey, payload) == 0) {
         return Status.OK;
       } else {
         return Status.ERROR;
       }
     } catch (RuntimeException e) {
-      endTxBestEffort(txStarted);
       return Status.ERROR;
     }
   }
@@ -247,35 +307,4 @@ public class ZnsTxClient extends DB {
     return out.toByteArray();
   }
 
-  private static Map<String, byte[]> deserializeFields(byte[] raw) {
-    Map<String, byte[]> fields = new HashMap<String, byte[]>();
-    ByteBuffer buffer = ByteBuffer.wrap(raw);
-
-    while (buffer.remaining() >= 8) {
-      int nameLen = buffer.getInt();
-      if (nameLen < 0 || nameLen > buffer.remaining()) {
-        break;
-      }
-
-      byte[] nameBytes = new byte[nameLen];
-      buffer.get(nameBytes);
-
-      if (buffer.remaining() < 4) {
-        break;
-      }
-
-      int valueLen = buffer.getInt();
-      if (valueLen < 0 || valueLen > buffer.remaining()) {
-        break;
-      }
-
-      byte[] valueBytes = new byte[valueLen];
-      buffer.get(valueBytes);
-
-      String fieldName = new String(nameBytes, StandardCharsets.UTF_8);
-      fields.put(fieldName, valueBytes);
-    }
-
-    return fields;
-  }
 }
